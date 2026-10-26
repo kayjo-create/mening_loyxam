@@ -1,68 +1,356 @@
-# Prerequisites
-*.d
+// Kubcraft C++ — soddalashtirilgan 3D blokli o'yin
+// Kutubxona: raylib (https://www.raylib.com/)
+// Kompilyatsiya:
+// g++ kubcraft.cpp -o kubcraft -lraylib -lGL -lm -lpthread -ldl -lrt -lX11
+//
+// Boshqaruv:
+// WASD — yurish
+// Sichqoncha — kameraga qarash
+// Space — sakrash
+// Chap sichqoncha — blokni buzish
+// O'ng sichqoncha — blok qo'yish
+// 1-5 — blok turini tanlash
+// Esc — chiqish
 
-# Compiled Object files
-*.slo
-*.lo
-*.o
-*.obj
+#include "raylib.h"
+#include "raymath.h"
+#include <vector>
+#include <cmath>
+#include <algorithm>
 
-# Precompiled Headers
-*.gch
-*.pch
+struct Block {
+    int x, y, z;
+    int type; // 1 = maysa, 2 = tuproq, 3 = tosh, 4 = taxta, 5 = qum
+    bool active;
+};
 
-# Linker files
-*.ilk
+struct HitResult {
+    bool hit = false;
+    int blockIndex = -1;
+    Vector3 normal = {0.0f, 0.0f, 0.0f};
+    Vector3 hitPos = {0.0f, 0.0f, 0.0f};
+    Vector3 blockCell = {0.0f, 0.0f, 0.0f};
+};
 
-# Debugger Files
-*.pdb
+static Color BlockColor(int type) {
+    switch (type) {
+        case 1: return GREEN;
+        case 2: return BROWN;
+        case 3: return GRAY;
+        case 4: return Color{166, 111, 57, 255};
+        case 5: return BEIGE;
+        default: return MAGENTA;
+    }
+}
 
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-*.so.*
+static int TerrainHeight(int x, int z) {
+    float n = sinf(x * 0.35f) + cosf(z * 0.28f);
+    return 1 + (int)(1.5f * (n + 2.0f) / 2.0f);
+}
 
-# Fortran module files
-*.mod
-*.smod
+static bool InBounds(int x, int y, int z, int worldSize) {
+    return x >= 0 && x < worldSize && y >= 0 && y < 32 && z >= 0 && z < worldSize;
+}
 
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
+static bool PointInAABB(const Vector3& p, const Vector3& minB, const Vector3& maxB) {
+    return p.x >= minB.x && p.x <= maxB.x &&
+           p.y >= minB.y && p.y <= maxB.y &&
+           p.z >= minB.z && p.z <= maxB.z;
+}
 
-# Executables
-*.exe
-*.out
-*.app
+int main() {
+    const int screenW = 1280;
+    const int screenH = 720;
+    const int worldSize = 24;
 
-# Build directories
-build/
-Build/
-build-*/
+    InitWindow(screenW, screenH, "Kubcraft C++");
+    SetTargetFPS(60);
+    DisableCursor();
 
-# CMake generated files
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
-install_manifest.txt
-compile_commands.json
+    Camera3D camera = {};
+    camera.position = {8.0f, 6.0f, 12.0f};
+    camera.target = {8.0f, 2.0f, 8.0f};
+    camera.up = {0.0f, 1.0f, 0.0f};
+    camera.fovy = 75.0f;
+    camera.projection = CAMERA_PERSPECTIVE;
 
-# Temporary files
-*.tmp
-*.log
-*.bak
-*.swp
+    std::vector<Block> blocks;
+    blocks.reserve(worldSize * worldSize * 6);
 
-# vcpkg
-vcpkg_installed/
+    // Dunyoni yaratish
+    for (int x = 0; x < worldSize; ++x) {
+        for (int z = 0; z < worldSize; ++z) {
+            int h = TerrainHeight(x, z);
+            for (int y = 0; y < h; ++y) {
+                int type = (y == h - 1) ? 1 : (y >= h - 3 ? 2 : 3);
+                blocks.push_back({x, y, z, type, true});
+            }
+        }
+    }
 
-# debug information files
-*.dwo
+    // O'yinchi parametrlari
+    int selectedBlock = 4;
+    float verticalVelocity = 0.0f;
+    bool onGround = false;
 
-# test output & cache
-Testing/
-.cache/
+    Vector3 player = {8.0f, 6.0f, 8.0f};
+    float yaw = 0.0f;
+    float pitch = -0.2f;
+
+    const float playerHalfWidth = 0.28f;
+    const float playerHeight = 1.8f;
+    const float eyeHeight = 1.65f;
+
+    auto findBlock = [&](int x, int y, int z) -> int {
+        for (int i = (int)blocks.size() - 1; i >= 0; --i) {
+            if (blocks[i].active &&
+                blocks[i].x == x &&
+                blocks[i].y == y &&
+                blocks[i].z == z) {
+                return i;
+            }
+        }
+        return -1;
+    };
+
+    auto collidesAt = [&](const Vector3& pos) -> bool {
+        Vector3 minB = {
+            pos.x - playerHalfWidth,
+            pos.y,
+            pos.z - playerHalfWidth
+        };
+        Vector3 maxB = {
+            pos.x + playerHalfWidth,
+            pos.y + playerHeight,
+            pos.z + playerHalfWidth
+        };
+
+        for (const auto& b : blocks) {
+            if (!b.active) continue;
+
+            Vector3 blockMin = { (float)b.x, (float)b.y, (float)b.z };
+            Vector3 blockMax = { (float)b.x + 1.0f, (float)b.y + 1.0f, (float)b.z + 1.0f };
+
+            if (maxB.x > blockMin.x && minB.x < blockMax.x &&
+                maxB.y > blockMin.y && minB.y < blockMax.y &&
+                maxB.z > blockMin.z && minB.z < blockMax.z) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto raycastBlocks = [&](const Vector3& origin, const Vector3& dir, float maxDistance) -> HitResult {
+        HitResult result;
+
+        Vector3 prev = origin;
+        for (float d = 0.0f; d <= maxDistance; d += 0.05f) {
+            Vector3 p = Vector3Add(origin, Vector3Scale(dir, d));
+
+            int cx = (int)floorf(p.x);
+            int cy = (int)floorf(p.y);
+            int cz = (int)floorf(p.z);
+
+            int prevCx = (int)floorf(prev.x);
+            int prevCy = (int)floorf(prev.y);
+            int prevCz = (int)floorf(prev.z);
+
+            int idx = findBlock(cx, cy, cz);
+            if (idx >= 0) {
+                result.hit = true;
+                result.blockIndex = idx;
+                result.hitPos = p;
+                result.blockCell = { (float)cx, (float)cy, (float)cz };
+
+                result.normal.x = (float)(cx - prevCx);
+                result.normal.y = (float)(cy - prevCy);
+                result.normal.z = (float)(cz - prevCz);
+
+                // Agar normal nol bo'lsa, fallback qilish
+                if (result.normal.x == 0.0f && result.normal.y == 0.0f && result.normal.z == 0.0f) {
+                    result.normal = {0.0f, 0.0f, 1.0f};
+                }
+
+                return result;
+            }
+
+            prev = p;
+        }
+
+        return result;
+    };
+
+    while (!WindowShouldClose()) {
+        float dt = GetFrameTime();
+
+        // Kamera va mouse
+        Vector2 mouseDelta = GetMouseDelta();
+        yaw -= mouseDelta.x * 0.0025f;
+        pitch -= mouseDelta.y * 0.0025f;
+
+        if (pitch > 1.45f) pitch = 1.45f;
+        if (pitch < -1.45f) pitch = -1.45f;
+
+        // O'yinchi harakati
+        Vector3 forward = { sinf(yaw), 0.0f, -cosf(yaw) };
+        Vector3 right = { cosf(yaw), 0.0f, sinf(yaw) };
+        Vector3 move = {0.0f, 0.0f, 0.0f};
+
+        if (IsKeyDown(KEY_W)) move = Vector3Add(move, forward);
+        if (IsKeyDown(KEY_S)) move = Vector3Subtract(move, forward);
+        if (IsKeyDown(KEY_D)) move = Vector3Add(move, right);
+        if (IsKeyDown(KEY_A)) move = Vector3Subtract(move, right);
+
+        if (Vector3Length(move) > 0.0001f) {
+            move = Vector3Normalize(move);
+            move = Vector3Scale(move, 5.0f * dt);
+
+            float newX = player.x + move.x;
+            if (!collidesAt({newX, player.y, player.z})) {
+                player.x = newX;
+            }
+
+            float newZ = player.z + move.z;
+            if (!collidesAt({player.x, player.y, newZ})) {
+                player.z = newZ;
+            }
+        }
+
+        // Sakrash va gravitatsiya
+        if (IsKeyPressed(KEY_SPACE) && onGround) {
+            verticalVelocity = 6.2f;
+            onGround = false;
+        }
+
+        verticalVelocity -= 16.0f * dt;
+        float newY = player.y + verticalVelocity * dt;
+
+        if (!collidesAt({player.x, newY, player.z})) {
+            player.y = newY;
+            onGround = false;
+        } else {
+            if (verticalVelocity < 0.0f) {
+                while (collidesAt({player.x, player.y + 0.02f, player.z})) {
+                    player.y += 0.02f;
+                }
+                verticalVelocity = 0.0f;
+                onGround = true;
+            } else {
+                while (collidesAt({player.x, player.y - 0.02f, player.z})) {
+                    player.y -= 0.02f;
+                }
+                verticalVelocity = 0.0f;
+            }
+        }
+
+        // Blok tanlash
+        if (IsKeyPressed(KEY_ONE)) selectedBlock = 1;
+        if (IsKeyPressed(KEY_TWO)) selectedBlock = 2;
+        if (IsKeyPressed(KEY_THREE)) selectedBlock = 3;
+        if (IsKeyPressed(KEY_FOUR)) selectedBlock = 4;
+        if (IsKeyPressed(KEY_FIVE)) selectedBlock = 5;
+
+        // Kamera pozitsiyasi
+        Vector3 eyePos = { player.x, player.y + eyeHeight, player.z };
+        Vector3 lookDir = {
+            sinf(yaw) * cosf(pitch),
+            sinf(pitch),
+            -cosf(yaw) * cosf(pitch)
+        };
+        camera.position = eyePos;
+        camera.target = Vector3Add(eyePos, lookDir);
+
+        // Blok buzish / qo'yish
+        Vector3 castOrigin = eyePos;
+        Vector3 castDir = lookDir;
+
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            HitResult hit = raycastBlocks(castOrigin, castDir, 6.0f);
+            if (hit.hit && hit.blockIndex >= 0) {
+                blocks[hit.blockIndex].active = false;
+            }
+        }
+
+        if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+            HitResult hit = raycastBlocks(castOrigin, castDir, 6.0f);
+            if (hit.hit && hit.blockIndex >= 0) {
+                int bx = (int)floorf(hit.blockCell.x);
+                int by = (int)floorf(hit.blockCell.y);
+                int bz = (int)floorf(hit.blockCell.z);
+
+                int placeX = bx - (int)roundf(hit.normal.x);
+                int placeY = by - (int)roundf(hit.normal.y);
+                int placeZ = bz - (int)roundf(hit.normal.z);
+
+                if (InBounds(placeX, placeY, placeZ, worldSize)) {
+                    if (findBlock(placeX, placeY, placeZ) < 0) {
+                        // O'yinchi ichiga blok qo'ymaslik
+                        Vector3 placeCenter = { (float)placeX + 0.5f, (float)placeY + 0.5f, (float)placeZ + 0.5f };
+                        Vector3 blockMin = { placeCenter.x - 0.5f, placeCenter.y - 0.5f, placeCenter.z - 0.5f };
+                        Vector3 blockMax = { placeCenter.x + 0.5f, placeCenter.y + 0.5f, placeCenter.z + 0.5f };
+
+                        Vector3 playerMin = { player.x - playerHalfWidth, player.y, player.z - playerHalfWidth };
+                        Vector3 playerMax = { player.x + playerHalfWidth, player.y + playerHeight, player.z + playerHalfWidth };
+
+                        bool intersectsPlayer = !(playerMax.x <= blockMin.x ||
+                                                 playerMin.x >= blockMax.x ||
+                                                 playerMax.y <= blockMin.y ||
+                                                 playerMin.y >= blockMax.y ||
+                                                 playerMax.z <= blockMin.z ||
+                                                 playerMin.z >= blockMax.z);
+
+                        if (!intersectsPlayer) {
+                            blocks.push_back({placeX, placeY, placeZ, selectedBlock, true});
+                        }
+                    }
+                }
+            }
+        }
+
+        // Chizish
+        BeginDrawing();
+        ClearBackground(Color{126, 200, 255, 255});
+
+        BeginMode3D(camera);
+
+        // Yer / platforma
+        DrawPlane({12.0f, -0.05f, 12.0f}, {200.0f, 200.0f}, Color{90, 170, 80, 255});
+
+        // Bloklar
+        for (const auto& b : blocks) {
+            if (!b.active) continue;
+
+            Vector3 cubePos = { (float)b.x + 0.5f, (float)b.y + 0.5f, (float)b.z + 0.5f };
+            DrawCube(cubePos, 1.0f, 1.0f, 1.0f, BlockColor(b.type));
+            DrawCubeWires(cubePos, 1.0f, 1.0f, 1.0f, Fade(BLACK, 0.18f));
+        }
+
+        // O'yinchi body (yordamchi)
+        Vector3 pBoxMin = { player.x - playerHalfWidth, player.y, player.z - playerHalfWidth };
+        Vector3 pBoxMax = { player.x + playerHalfWidth, player.y + playerHeight, player.z + playerHalfWidth };
+        DrawCubeWires({player.x, player.y + playerHeight * 0.5f, player.z},
+                      playerHalfWidth * 2.0f, playerHeight, playerHalfWidth * 2.0f,
+                      RED);
+
+        EndMode3D();
+
+        // UI
+        DrawText("KUBCRAFT C++", 20, 18, 24, DARKBLUE);
+        DrawText("WASD: yurish | Sichqoncha: qarash | SPACE: sakrash", 20, 50, 18, BLACK);
+        DrawText("Chap tugma: buzish | O'ng tugma: blok qo'yish | 1-5: blok tanlash", 20, 76, 18, BLACK);
+        DrawText(TextFormat("Tanlangan blok: %d", selectedBlock), 20, 106, 18, MAROON);
+
+        DrawLine(screenW / 2 - 8, screenH / 2, screenW / 2 + 8, screenH / 2, WHITE);
+        DrawLine(screenW / 2, screenH / 2 - 8, screenW / 2, screenH / 2 + 8, WHITE);
+
+        DrawRectangle(screenW - 190, 18, 170, 48, Fade(RAYWHITE, 0.8f));
+        DrawText("Blok rangi:", screenW - 180, 24, 14, BLACK);
+        DrawRectangle(screenW - 180, 45, 24, 14, BlockColor(selectedBlock));
+        DrawText("ESC: chiqish", screenW - 130, 44, 14, BLACK);
+
+        EndDrawing();
+    }
+
+    CloseWindow();
+    return 0;
+}
